@@ -3,30 +3,60 @@ version: 0.2
 env:
   variables:
     AWS_REGION: "ap-southeast-1"
+    ACCOUNT_ID: "432637347995"
     CLUSTER_NAME: "Sun-Series-Travel-Prod"
     K8S_NAMESPACE: "default"
+
+    # ECR repo/ชื่อแอป
+    ECR_REPO: "ms-access-control-1"
     APP_NAME: "ms-access-control-1"
-    PLACEHOLDER_IMAGE: "public.ecr.aws/docker/library/nginx:alpine"  # ภาพทดสอบ
+
+    # แท็กภาพ: ใช้ commit SHA ของ CodeBuild ถ้ามี; ไม่มีก็ fallback เป็น latest
+    IMAGE_TAG: "latest"
+
+    # ภาพฐานที่จะดึงมา re-tag เป็นของเรา (ใช้ Public ECR แทน Docker Hub)
+    BASE_IMAGE: "public.ecr.aws/docker/library/nginx:alpine"
 
 phases:
   install:
     runtime-versions:
-      java: corretto17   # จะไม่ใช้จริง แต่คงไว้ได้
+      java: corretto17
     commands:
       - "set -euo pipefail"
       - "aws --version"
-      - 'echo "Installing kubectl (fallback to dl.k8s.io)..."'
+      - 'echo "Installing kubectl..."'
       - 'K8S_VER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query "cluster.version" --output text)'
       - 'echo "Detected cluster.version: ${K8S_VER}"'
-      - 'KUBE_URL_UP="https://dl.k8s.io/release/v${K8S_VER}.0/bin/linux/amd64/kubectl"'
-      - 'curl -fsSL -o /usr/local/bin/kubectl "${KUBE_URL_UP}"'
+      - 'curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v${K8S_VER}.0/bin/linux/amd64/kubectl"'
       - 'chmod +x /usr/local/bin/kubectl'
       - 'kubectl version --client --output=yaml || (echo "kubectl not working"; exit 1)'
 
   pre_build:
     commands:
-      - 'echo "Preparing smoke manifest..."'
-      # สร้างไฟล์แมนิเฟสต์ชั่วคราว (Deployment + Service LoadBalancer)
+      - 'echo "Resolve tag & login ECR..."'
+      - 'RESOLVED_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:-${IMAGE_TAG}}"'
+      - 'echo "RESOLVED_TAG=${RESOLVED_TAG}"'
+      - 'ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${RESOLVED_TAG}"'
+      - 'echo "ECR_URI=${ECR_URI}"'
+
+      - 'aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" || aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION"'
+      - 'aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"'
+
+      - 'echo "Pull base image & push to ECR..."'
+      - 'docker pull "${BASE_IMAGE}"'
+      - 'docker tag "${BASE_IMAGE}" "${ECR_URI}"'
+      - 'docker push "${ECR_URI}"'
+
+  build:
+    commands:
+      - 'echo "No build step needed in smoke mode."'
+
+  post_build:
+    commands:
+      - 'echo "Updating kubeconfig & deploying..."'
+      - 'aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"'
+
+      - 'echo "Generate manifest using ECR image..."'
       - |
         cat > /tmp/smoke.yaml <<EOF
         apiVersion: apps/v1
@@ -42,7 +72,7 @@ phases:
             spec:
               containers:
                 - name: nginx
-                  image: ${PLACEHOLDER_IMAGE}
+                  image: ${ECR_URI}
                   ports: [{ containerPort: 80 }]
                   readinessProbe:
                     httpGet: { path: /, port: 80 }
@@ -71,20 +101,10 @@ phases:
               protocol: TCP
         EOF
 
-  build:
-    commands:
-      - 'echo "Skip build (smoke deploy mode)"'
-
-  post_build:
-    commands:
-      - 'echo "Updating kubeconfig..."'
-      - 'aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"'
-      - 'echo "Applying smoke manifest..."'
       - 'kubectl -n "$K8S_NAMESPACE" apply -f /tmp/smoke.yaml'
       - 'kubectl -n "$K8S_NAMESPACE" rollout status deploy/${APP_NAME}-smoke'
-      - 'echo "Service details:"'
       - 'kubectl -n "$K8S_NAMESPACE" get svc ${APP_NAME}-smoke -o wide'
-      - 'echo "Smoke deploy completed."'
+      - 'echo "Smoke deploy with ECR image completed."'
 
 artifacts:
   files:
