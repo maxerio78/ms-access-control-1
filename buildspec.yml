@@ -2,123 +2,89 @@ version: 0.2
 
 env:
   variables:
-    CLUSTER_NAME: "Sun-Series-Travel-Prod"
     AWS_REGION: "ap-southeast-1"
-    IMAGE_REPO_NAME: "ms-access-control-1"
-    IMAGE_TAG: "latest"   # จะ override ด้วย CODEBUILD_RESOLVED_SOURCE_VERSION ด้านล่าง
-    ACCOUNT_ID: "432637347995"
+    CLUSTER_NAME: "Sun-Series-Travel-Prod"
     K8S_NAMESPACE: "default"
-    DEPLOYMENT_FILE: "k8s/deployment.yaml"
-    SERVICE_FILE: "k8s/service.yaml"
-    EKS_RELEASE_DATE: "2025-01-19"
-    # (optional สำหรับ private Maven repo)
-    # MAVEN_REPO_URL: ""
-    # MAVEN_REPO_ID: "internal"
-    # MAVEN_USERNAME: ""
-    # MAVEN_PASSWORD: ""
+    APP_NAME: "ms-access-control-1"
+    PLACEHOLDER_IMAGE: "public.ecr.aws/docker/library/nginx:alpine"  # ภาพทดสอบ
 
 phases:
   install:
     runtime-versions:
-      java: corretto17
+      java: corretto17   # จะไม่ใช้จริง แต่คงไว้ได้
     commands:
       - "set -euo pipefail"
-      - "echo Checking versions..."
-      - "java -version || true"
-      - "mvn -v || true"
       - "aws --version"
-      - 'echo "Installing kubectl (EKS S3 with fallback to dl.k8s.io)..."'
+      - 'echo "Installing kubectl (fallback to dl.k8s.io)..."'
       - 'K8S_VER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query "cluster.version" --output text)'
       - 'echo "Detected cluster.version: ${K8S_VER}"'
-      - 'EKS_DATE=${EKS_RELEASE_DATE}'
-      - 'KUBE_URL_AWS="https://s3.us-west-2.amazonaws.com/amazon-eks/${K8S_VER}/${EKS_DATE}/bin/linux/amd64/kubectl"'
       - 'KUBE_URL_UP="https://dl.k8s.io/release/v${K8S_VER}.0/bin/linux/amd64/kubectl"'
-      - 'echo "Trying: ${KUBE_URL_AWS}"'
-      - |
-        if curl -sIf "${KUBE_URL_AWS}" > /dev/null; then
-          echo "Downloading from EKS S3...";
-          curl --retry 3 --retry-delay 2 -fL -o /usr/local/bin/kubectl "${KUBE_URL_AWS}";
-        else
-          echo "EKS S3 not found for ${K8S_VER}, fallback to ${KUBE_URL_UP}";
-          curl --retry 3 --retry-delay 2 -fL -o /usr/local/bin/kubectl "${KUBE_URL_UP}";
-        fi
-      - "chmod +x /usr/local/bin/kubectl"
-      - "kubectl version --client --output=yaml || (echo 'kubectl not working'; exit 1)"
+      - 'curl -fsSL -o /usr/local/bin/kubectl "${KUBE_URL_UP}"'
+      - 'chmod +x /usr/local/bin/kubectl'
+      - 'kubectl version --client --output=yaml || (echo "kubectl not working"; exit 1)'
 
   pre_build:
     commands:
-      - 'echo "Configuring Maven (optional private repo)..."'
+      - 'echo "Preparing smoke manifest..."'
+      # สร้างไฟล์แมนิเฟสต์ชั่วคราว (Deployment + Service LoadBalancer)
       - |
-        if [ -n "${MAVEN_REPO_URL:-}" ] && [ -n "${MAVEN_REPO_ID:-}" ] && [ -n "${MAVEN_USERNAME:-}" ] && [ -n "${MAVEN_PASSWORD:-}" ]; then
-          mkdir -p ~/.m2
-          printf '%s\n' \
-            '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">' \
-            '  <servers>' \
-            "    <server><id>${MAVEN_REPO_ID}</id><username>${MAVEN_USERNAME}</username><password>${MAVEN_PASSWORD}</password></server>" \
-            '  </servers>' \
-            '  <profiles>' \
-            '    <profile>' \
-            '      <id>use-internal</id>' \
-            '      <repositories>' \
-            "        <repository><id>${MAVEN_REPO_ID}</id><url>${MAVEN_REPO_URL}</url><releases><enabled>true</enabled></releases><snapshots><enabled>true</enabled></snapshots></repository>" \
-            '      </repositories>' \
-            '      <pluginRepositories>' \
-            "        <pluginRepository><id>${MAVEN_REPO_ID}</id><url>${MAVEN_REPO_URL}</url></pluginRepository>" \
-            '      </pluginRepositories>' \
-            '    </profile>' \
-            '  </profiles>' \
-            '  <activeProfiles><activeProfile>use-internal</activeProfile></activeProfiles>' \
-            '</settings>' \
-            > ~/.m2/settings.xml
-        else
-          echo "No private Maven repo envs provided; using Maven Central only."
-        fi
-
-      - "echo Building Spring Boot JAR..."
-      - |
-        if [ -f mvnw ] || [ -f pom.xml ]; then
-          chmod +x mvnw 2>/dev/null || true
-          ./mvnw -q -DskipTests package || mvn -q -DskipTests package
-          export JAR_FILE=$(ls target/*.jar 2>/dev/null | head -n1 || true)
-        else
-          echo 'pom.xml not found'; exit 1
-        fi
-      - 'test -f "$JAR_FILE" || (echo "JAR not found (check Maven deps/credentials)."; exit 1)'
-      - 'echo "JAR_FILE=${JAR_FILE}"'
-
-      # ใช้ commit SHA ถ้ามี; ถ้าไม่มีกลับไปใช้ IMAGE_TAG (latest)
-      - 'RESOLVED_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:-${IMAGE_TAG}}"'
-      - 'echo "RESOLVED_TAG=${RESOLVED_TAG}"'
-
-      - 'aws ecr describe-repositories --repository-names "$IMAGE_REPO_NAME" --region "$AWS_REGION" || aws ecr create-repository --repository-name "$IMAGE_REPO_NAME" --region "$AWS_REGION"'
-      - 'aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"'
-
-      - "echo Building Docker image..."
-      - "docker build -t ${IMAGE_REPO_NAME}:${RESOLVED_TAG} ."
-      - 'docker tag "${IMAGE_REPO_NAME}:${RESOLVED_TAG}" "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${RESOLVED_TAG}"'
+        cat > /tmp/smoke.yaml <<EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: ${APP_NAME}-smoke
+          labels: { app: ${APP_NAME}-smoke }
+        spec:
+          replicas: 2
+          selector: { matchLabels: { app: ${APP_NAME}-smoke } }
+          template:
+            metadata: { labels: { app: ${APP_NAME}-smoke } }
+            spec:
+              containers:
+                - name: nginx
+                  image: ${PLACEHOLDER_IMAGE}
+                  ports: [{ containerPort: 80 }]
+                  readinessProbe:
+                    httpGet: { path: /, port: 80 }
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
+                  livenessProbe:
+                    httpGet: { path: /, port: 80 }
+                    initialDelaySeconds: 15
+                    periodSeconds: 10
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: ${APP_NAME}-smoke
+          labels: { app: ${APP_NAME}-smoke }
+          annotations:
+            service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+            service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+            service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+        spec:
+          type: LoadBalancer
+          selector: { app: ${APP_NAME}-smoke }
+          ports:
+            - port: 80
+              targetPort: 80
+              protocol: TCP
+        EOF
 
   build:
     commands:
-      - "echo Pushing Docker image to ECR..."
-      - 'docker push "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${RESOLVED_TAG}"'
+      - 'echo "Skip build (smoke deploy mode)"'
 
   post_build:
     commands:
-      - "echo Updating kubeconfig for EKS..."
+      - 'echo "Updating kubeconfig..."'
       - 'aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"'
-      - "echo Deploying..."
-
-      - 'IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${RESOLVED_TAG}"'
-      - 'echo "IMAGE_URI=${IMAGE_URI}"'
-
-      - 'sed -i "s|<ci-name>|${IMAGE_REPO_NAME}|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
-      - 'sed -i "s|<tag>|${RESOLVED_TAG}|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
-      - 'sed -i "s|index.docker.io/sunseries|${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
-
-      - 'kubectl -n "$K8S_NAMESPACE" apply -f "$DEPLOYMENT_FILE"'
-      - 'kubectl -n "$K8S_NAMESPACE" apply -f "$SERVICE_FILE"'
-      - 'kubectl -n "$K8S_NAMESPACE" rollout status deploy/${IMAGE_REPO_NAME}-deployment'
-      - "echo Done."
+      - 'echo "Applying smoke manifest..."'
+      - 'kubectl -n "$K8S_NAMESPACE" apply -f /tmp/smoke.yaml'
+      - 'kubectl -n "$K8S_NAMESPACE" rollout status deploy/${APP_NAME}-smoke'
+      - 'echo "Service details:"'
+      - 'kubectl -n "$K8S_NAMESPACE" get svc ${APP_NAME}-smoke -o wide'
+      - 'echo "Smoke deploy completed."'
 
 artifacts:
   files:
