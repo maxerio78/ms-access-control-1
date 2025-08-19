@@ -4,8 +4,8 @@ env:
   variables:
     CLUSTER_NAME: "Sun-Series-Travel-Prod"
     AWS_REGION: "ap-southeast-1"
-    IMAGE_REPO_NAME: "springboot-app"
-    IMAGE_TAG: "$CODEBUILD_RESOLVED_SOURCE_VERSION"   # tag ตาม commit
+    IMAGE_REPO_NAME: "ms-access-control-1"
+    IMAGE_TAG: "$CODEBUILD_RESOLVED_SOURCE_VERSION"
     ACCOUNT_ID: "432637347995"
     K8S_NAMESPACE: "default"
     DEPLOYMENT_FILE: "k8s/deployment.yaml"
@@ -17,79 +17,62 @@ phases:
     runtime-versions:
       java: corretto17
     commands:
-      - set -euo pipefail
-      - echo "Checking versions..."
-      - java -version
-      - mvn -v || true
-      - gradle -v || true
-      - aws --version
-
-      # --- Install kubectl (match cluster or fallback) ---
-      - echo "Installing kubectl (EKS S3 with fallback to dl.k8s.io)..."
-      - K8S_VER=$(aws eks describe-cluster --name $CLUSTER_NAME --region $AWS_REGION --query "cluster.version" --output text)
-      - echo "Detected cluster.version: ${K8S_VER}"
-      - EKS_DATE=${EKS_RELEASE_DATE}
-      - KUBE_URL_AWS="https://s3.us-west-2.amazonaws.com/amazon-eks/${K8S_VER}/${EKS_DATE}/bin/linux/amd64/kubectl"
-      - KUBE_URL_UP="https://dl.k8s.io/release/v${K8S_VER}.0/bin/linux/amd64/kubectl"
-      - echo "Trying: ${KUBE_URL_AWS}"
+      - "set -euo pipefail"
+      - "echo Checking versions..."
+      - "java -version || true"
+      - "mvn -v || true"
+      - "aws --version"
+      - "echo Installing kubectl (EKS S3 with fallback to dl.k8s.io)..."
+      - 'K8S_VER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query "cluster.version" --output text)'
+      - 'echo Detected cluster.version: ${K8S_VER}'
+      - 'EKS_DATE=${EKS_RELEASE_DATE}'
+      - 'KUBE_URL_AWS="https://s3.us-west-2.amazonaws.com/amazon-eks/${K8S_VER}/${EKS_DATE}/bin/linux/amd64/kubectl"'
+      - 'KUBE_URL_UP="https://dl.k8s.io/release/v${K8S_VER}.0/bin/linux/amd64/kubectl"'
+      - 'echo Trying: ${KUBE_URL_AWS}'
       - |
         if curl -sIf "${KUBE_URL_AWS}" > /dev/null; then
-          echo "Downloading from EKS S3..."
+          echo "Downloading from EKS S3...";
           curl --retry 3 --retry-delay 2 -fL -o /usr/local/bin/kubectl "${KUBE_URL_AWS}";
         else
           echo "EKS S3 not found for ${K8S_VER}, fallback to ${KUBE_URL_UP}";
           curl --retry 3 --retry-delay 2 -fL -o /usr/local/bin/kubectl "${KUBE_URL_UP}";
         fi
-      - chmod +x /usr/local/bin/kubectl
-      - kubectl version --client --output=yaml || (echo "kubectl not working"; exit 1)
+      - "chmod +x /usr/local/bin/kubectl"
+      - "kubectl version --client --output=yaml || (echo 'kubectl not working'; exit 1)"
 
   pre_build:
     commands:
-      - echo "Building Spring Boot application..."
-      # Detect Maven or Gradle
+      - "echo Building Spring Boot JAR..."
       - |
-        if [ -f "mvnw" ] || [ -f "pom.xml" ]; then
-          echo "Detected Maven"
-          chmod +x mvnw || true
+        if [ -f mvnw ] || [ -f pom.xml ]; then
+          chmod +x mvnw 2>/dev/null || true
           ./mvnw -q -DskipTests package || mvn -q -DskipTests package
-          export JAR_FILE=$(ls target/*-SNAPSHOT.jar 2>/dev/null || ls target/*.jar | head -n1)
-        elif [ -f "gradlew" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-          echo "Detected Gradle"
-          chmod +x gradlew || true
-          ./gradlew -q clean bootJar || ./gradlew -q bootJar
-          export JAR_FILE=$(ls build/libs/*-SNAPSHOT.jar 2>/dev/null || ls build/libs/*.jar | head -n1)
+          export JAR_FILE=$(ls target/*.jar | head -n1)
         else
-          echo "No Maven/Gradle build files found"; exit 1
+          echo 'pom.xml not found'; exit 1
         fi
-      - echo "JAR_FILE=${JAR_FILE}"
-      - test -f "$JAR_FILE" || (echo "JAR not found"; exit 1)
-
-      - echo "Logging in to Amazon ECR..."
-      - aws ecr describe-repositories --repository-names "$IMAGE_REPO_NAME" --region "$AWS_REGION" \
-          || aws ecr create-repository --repository-name "$IMAGE_REPO_NAME" --region "$AWS_REGION"
-      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-
-      - echo "Preparing Docker build context..."
-      - mkdir -p docker && cp "$JAR_FILE" docker/app.jar
-
-      - echo "Building Docker image..."
-      - docker build -f Dockerfile -t $IMAGE_REPO_NAME:$IMAGE_TAG .
-
-      - echo "Tagging Docker image..."
-      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
+      - 'echo JAR_FILE=${JAR_FILE}'
+      - 'aws ecr describe-repositories --repository-names "$IMAGE_REPO_NAME" --region "$AWS_REGION" || aws ecr create-repository --repository-name "$IMAGE_REPO_NAME" --region "$AWS_REGION"'
+      - 'aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"'
+      - "echo Building Docker image..."
+      - "docker build -t ${IMAGE_REPO_NAME}:${IMAGE_TAG} ."
+      - 'docker tag "${IMAGE_REPO_NAME}:${IMAGE_TAG}" "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${IMAGE_TAG}"'
 
   build:
     commands:
-      - echo "Pushing Docker image to ECR..."
-      - docker push $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
+      - "echo Pushing Docker image to ECR..."
+      - 'docker push "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${IMAGE_TAG}"'
 
   post_build:
     commands:
-      - echo "Updating kubeconfig for EKS..."
-      - aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
-      - echo "Deploying to Kubernetes..."
-      - bash scripts/deploy.sh
-      - echo "Done."
+      - "echo Updating kubeconfig for EKS..."
+      - 'aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"'
+      - "echo Deploying..."
+      - 'sed -i "s|<tag>|${IMAGE_TAG}|g" "$DEPLOYMENT_FILE"'
+      - 'kubectl -n "$K8S_NAMESPACE" apply -f "$DEPLOYMENT_FILE"'
+      - 'kubectl -n "$K8S_NAMESPACE" apply -f "$SERVICE_FILE"'
+      - 'kubectl -n "$K8S_NAMESPACE" rollout status deploy/<ci-name>-deployment'
+      - "echo Done."
 
 artifacts:
   files:
