@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <property name="SERVICE_NAME" value="ms-access-control" />
+
+    <logger name="org.springframework.web" level="ERROR"/>
+    <logger name="org.springframework.boot" level="ERROR" />
+    <logger name="org.quartz" level="ERROR" />
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="ch.qos.logback.core.encoder.LayoutWrappingEncoder">
+            <layout class="sunseries.travel.library.logback.CustomJsonLayout">
+                <serviceName>${SERVICE_NAME}</serviceName>
+                <timestampFormat>yyyy-MM-dd HH:mm:ss.SSS</timestampFormat>
+                <jsonFormatter class="ch.qos.logback.contrib.jackson.JacksonJsonFormatter" />
+                <appendLineSeparator>true</appendLineSeparator>
+            </layout>
+        </encoder>
+    </appender>
+    <appender name="SLACK" class="sunseries.travel.library.utility.slack.SlackAppender">
+        <serviceName>${SERVICE_NAME}</serviceName>
+    </appender>
+
+    <logger name="sunseries.travel.library.component" additivity="false">
+        <level value="WARN"/>
+        <appender-ref ref="STDOUT"/>
+    </logger>
+    <logger name="sunseries.travel.java.rpc.v2.server" additivity="false">
+        <level value="WARN"/>
+        <appender-ref ref="STDOUT"/>
+    </logger>
+
+    <root level="INFO">
+        <appender-ref ref="STDOUT" />
+        <appender-ref ref="SLACK" />
+    </root>
+</configuration>

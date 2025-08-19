@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <ci-name>-deployment
+  labels:
+    app: <ci-name>
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: <ci-name>
+  template:
+    metadata:
+      labels:
+        app: <ci-name>
+    spec:
+      containers:
+        - name: <ci-name>
+          # ใช้ภาพจาก ECR (แทน Docker Hub)
+          image: 432637347995.dkr.ecr.ap-southeast-1.amazonaws.com/<ci-name>:<tag>
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
+          # แนะนำใส่ probe ให้ deployment/rollout เสถียร
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1024Mi"
+          volumeMounts:
+            # เมานต์ไฟล์คอนฟิกจาก ConfigMap เป็นไฟล์ชื่อ sunseries.ini
+            - name: sunseries-config
+              mountPath: /etc/sunseries.ini
+              subPath: sunseries.ini
+            # timezone (ถ้าต้องการ)
+            - name: tz-info
+              mountPath: /etc/localtime
+              readOnly: true
+      volumes:
+        - name: sunseries-config
+          configMap:
+            name: sunseries-config
+            items:
+              - key: sunseries.ini
+                path: sunseries.ini
+        - name: tz-info
+          hostPath:
+            path: /etc/localtime
+            type: File
+      # ECR ไม่ต้องใช้ imagePullSecrets ถ้าโหนด/Pod execution role มีสิทธิ์ ecr:*
+      # ถ้ายังต้องใช้ secret ให้คงบล็อกนี้ไว้
+      # imagePullSecrets:
+      #   - name: sunseries-pull-secret
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: <ci-name>-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: <ci-name>-deployment
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80

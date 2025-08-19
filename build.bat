@@ -1,0 +1,1 @@
+cd..\java-basicjrpc &&  mvn clean install && cd ..\library-java-utility && mvn clean install && cd ..\library-java-hotel-objects && mvn clean install && cd ..\ms-access-control && mvn clean package

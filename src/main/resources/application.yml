@@ -1,0 +1,40 @@
+kafka:
+    server : ${MQ_NODES}
+    port : 9092
+    topic : sunseries
+    channel : ms-access-control
+    consumer:
+        count: 10
+        stream: 40
+
+couchbase:
+    host: ${COUCHBASE6_NODES}
+    bucket:
+        name: authenticate
+        username: sunseries
+        password: sunseries
+    env:
+        timeouts:
+            connect: 10000
+            socket-connect: 10000
+
+redis:
+    host: ${REDIS_NODES}
+    port: 6379
+    cache:
+        ttl: 5
+    permission-queue :
+        name: permission-queue
+        host: ${REDIS_NODES}
+        port: 6379
+    pool:
+        max:
+            total: 30
+            idle: 30
+        min:
+            idle: 10
+    type: "lettuce"
+    cluster:
+        enabled: ${REDIS_CLUSTER_ENABLED:false}
+        nodes: ${REDIS_CLUSTER_NODES:""}
+        port: 6381

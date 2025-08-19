@@ -1,0 +1,2 @@
+replicas=1
+wait_period=60

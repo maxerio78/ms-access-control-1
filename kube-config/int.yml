@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <ci-name>-deployment
+  labels:
+    app: <ci-name>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <ci-name>
+  template:
+    metadata:
+      labels:
+        app: <ci-name>
+    spec:
+      containers:
+      - name: <ci-name>
+        image: index.docker.io/sunseries/<ci-name>:<tag>
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: int
+        resources:
+          requests:
+            cpu: 250m
+        volumeMounts:
+        - name: sunseries-config
+          mountPath: /etc/sunseries.ini
+        - name: tz-info
+          mountPath: /etc/localtime
+      volumes:
+      - name: sunseries-config
+        hostPath:
+          path: /etc/sunseries.ini
+          type: File
+      - name: tz-info
+        hostPath:
+          path: /etc/localtime
+          type: File
+      imagePullSecrets:
+      - name: sunseries-pull-secret
+---
+apiVersion: autoscaling/v2beta2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: <ci-name>-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: <ci-name>-deployment
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
