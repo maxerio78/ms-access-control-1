@@ -22,13 +22,13 @@ phases:
       - "java -version || true"
       - "mvn -v || true"
       - "aws --version"
-      - "echo Installing kubectl (EKS S3 with fallback to dl.k8s.io)..."
+      - 'echo "Installing kubectl (EKS S3 with fallback to dl.k8s.io)..."'
       - 'K8S_VER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query "cluster.version" --output text)'
-      - 'echo Detected cluster.version: ${K8S_VER}'
+      - 'echo "Detected cluster.version: ${K8S_VER}"'
       - 'EKS_DATE=${EKS_RELEASE_DATE}'
       - 'KUBE_URL_AWS="https://s3.us-west-2.amazonaws.com/amazon-eks/${K8S_VER}/${EKS_DATE}/bin/linux/amd64/kubectl"'
       - 'KUBE_URL_UP="https://dl.k8s.io/release/v${K8S_VER}.0/bin/linux/amd64/kubectl"'
-      - 'echo Trying: ${KUBE_URL_AWS}'
+      - 'echo "Trying: ${KUBE_URL_AWS}"'
       - |
         if curl -sIf "${KUBE_URL_AWS}" > /dev/null; then
           echo "Downloading from EKS S3...";
@@ -68,10 +68,20 @@ phases:
       - "echo Updating kubeconfig for EKS..."
       - 'aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"'
       - "echo Deploying..."
-      - 'sed -i "s|<tag>|${IMAGE_TAG}|g" "$DEPLOYMENT_FILE"'
+
+      # --- เตรียมตัวแปรภาพใน ECR ---
+      - 'IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${IMAGE_TAG}"'
+      - 'echo "IMAGE_URI=${IMAGE_URI}"'
+
+      # --- แทนค่าพร้อมกันทั้ง 2 ไฟล์ ---
+      - 'sed -i "s|<ci-name>|${IMAGE_REPO_NAME}|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
+      - 'sed -i "s|<tag>|${IMAGE_TAG}|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
+      # กรณีไฟล์เดิมอ้าง Docker Hub (index.docker.io/sunseries), เปลี่ยนเป็น ECR
+      - 'sed -i "s|index.docker.io/sunseries|${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
+
       - 'kubectl -n "$K8S_NAMESPACE" apply -f "$DEPLOYMENT_FILE"'
       - 'kubectl -n "$K8S_NAMESPACE" apply -f "$SERVICE_FILE"'
-      - 'kubectl -n "$K8S_NAMESPACE" rollout status deploy/<ci-name>-deployment'
+      - 'kubectl -n "$K8S_NAMESPACE" rollout status deploy/${IMAGE_REPO_NAME}-deployment'
       - "echo Done."
 
 artifacts:
