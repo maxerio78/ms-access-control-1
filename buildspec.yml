@@ -5,13 +5,13 @@ env:
     CLUSTER_NAME: "Sun-Series-Travel-Prod"
     AWS_REGION: "ap-southeast-1"
     IMAGE_REPO_NAME: "ms-access-control-1"
-    IMAGE_TAG: "latest"                       # ค่าเริ่มต้น; จะถูก override ด้วย CODEBUILD_RESOLVED_SOURCE_VERSION
+    IMAGE_TAG: "latest"   # จะ override ด้วย CODEBUILD_RESOLVED_SOURCE_VERSION ด้านล่าง
     ACCOUNT_ID: "432637347995"
     K8S_NAMESPACE: "default"
     DEPLOYMENT_FILE: "k8s/deployment.yaml"
     SERVICE_FILE: "k8s/service.yaml"
     EKS_RELEASE_DATE: "2025-01-19"
-    # (ทางเลือก) ตั้งค่านี้ใน CodeBuild ถ้า dependency อยู่ private repo (Nexus/Artifactory/GH Packages)
+    # (optional สำหรับ private Maven repo)
     # MAVEN_REPO_URL: ""
     # MAVEN_REPO_ID: "internal"
     # MAVEN_USERNAME: ""
@@ -51,41 +51,25 @@ phases:
       - |
         if [ -n "${MAVEN_REPO_URL:-}" ] && [ -n "${MAVEN_REPO_ID:-}" ] && [ -n "${MAVEN_USERNAME:-}" ] && [ -n "${MAVEN_PASSWORD:-}" ]; then
           mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml <<'XML'
-          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
-            <servers>
-              <server>
-                <id>${env.MAVEN_REPO_ID}</id>
-                <username>${env.MAVEN_USERNAME}</username>
-                <password>${env.MAVEN_PASSWORD}</password>
-              </server>
-            </servers>
-            <profiles>
-              <profile>
-                <id>use-internal</id>
-                <repositories>
-                  <repository>
-                    <id>${env.MAVEN_REPO_ID}</id>
-                    <url>${env.MAVEN_REPO_URL}</url>
-                    <releases><enabled>true</enabled></releases>
-                    <snapshots><enabled>true</enabled></snapshots>
-                  </repository>
-                </repositories>
-                <pluginRepositories>
-                  <pluginRepository>
-                    <id>${env.MAVEN_REPO_ID}</id>
-                    <url>${env.MAVEN_REPO_URL}</url>
-                  </pluginRepository>
-                </pluginRepositories>
-              </profile>
-            </profiles>
-            <activeProfiles>
-              <activeProfile>use-internal</activeProfile>
-            </activeProfiles>
-          </settings>
-          XML
+          printf '%s\n' \
+            '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">' \
+            '  <servers>' \
+            "    <server><id>${MAVEN_REPO_ID}</id><username>${MAVEN_USERNAME}</username><password>${MAVEN_PASSWORD}</password></server>" \
+            '  </servers>' \
+            '  <profiles>' \
+            '    <profile>' \
+            '      <id>use-internal</id>' \
+            '      <repositories>' \
+            "        <repository><id>${MAVEN_REPO_ID}</id><url>${MAVEN_REPO_URL}</url><releases><enabled>true</enabled></releases><snapshots><enabled>true</enabled></snapshots></repository>" \
+            '      </repositories>' \
+            '      <pluginRepositories>' \
+            "        <pluginRepository><id>${MAVEN_REPO_ID}</id><url>${MAVEN_REPO_URL}</url></pluginRepository>" \
+            '      </pluginRepositories>' \
+            '    </profile>' \
+            '  </profiles>' \
+            '  <activeProfiles><activeProfile>use-internal</activeProfile></activeProfiles>' \
+            '</settings>' \
+            > ~/.m2/settings.xml
         else
           echo "No private Maven repo envs provided; using Maven Central only."
         fi
@@ -102,7 +86,7 @@ phases:
       - 'test -f "$JAR_FILE" || (echo "JAR not found (check Maven deps/credentials)."; exit 1)'
       - 'echo "JAR_FILE=${JAR_FILE}"'
 
-      # --- resolve tag จาก CodeBuild (ถ้าไม่มี ใช้ IMAGE_TAG=latest) ---
+      # ใช้ commit SHA ถ้ามี; ถ้าไม่มีกลับไปใช้ IMAGE_TAG (latest)
       - 'RESOLVED_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:-${IMAGE_TAG}}"'
       - 'echo "RESOLVED_TAG=${RESOLVED_TAG}"'
 
@@ -127,7 +111,6 @@ phases:
       - 'IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${RESOLVED_TAG}"'
       - 'echo "IMAGE_URI=${IMAGE_URI}"'
 
-      # --- แทนค่าลง manifests ---
       - 'sed -i "s|<ci-name>|${IMAGE_REPO_NAME}|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
       - 'sed -i "s|<tag>|${RESOLVED_TAG}|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
       - 'sed -i "s|index.docker.io/sunseries|${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
