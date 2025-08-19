@@ -5,12 +5,17 @@ env:
     CLUSTER_NAME: "Sun-Series-Travel-Prod"
     AWS_REGION: "ap-southeast-1"
     IMAGE_REPO_NAME: "ms-access-control-1"
-    IMAGE_TAG: "$CODEBUILD_RESOLVED_SOURCE_VERSION"
+    IMAGE_TAG: "latest"                       # ค่าเริ่มต้น; จะถูก override ด้วย CODEBUILD_RESOLVED_SOURCE_VERSION
     ACCOUNT_ID: "432637347995"
     K8S_NAMESPACE: "default"
     DEPLOYMENT_FILE: "k8s/deployment.yaml"
     SERVICE_FILE: "k8s/service.yaml"
     EKS_RELEASE_DATE: "2025-01-19"
+    # (ทางเลือก) ตั้งค่านี้ใน CodeBuild ถ้า dependency อยู่ private repo (Nexus/Artifactory/GH Packages)
+    # MAVEN_REPO_URL: ""
+    # MAVEN_REPO_ID: "internal"
+    # MAVEN_USERNAME: ""
+    # MAVEN_PASSWORD: ""
 
 phases:
   install:
@@ -42,26 +47,76 @@ phases:
 
   pre_build:
     commands:
+      - 'echo "Configuring Maven (optional private repo)..."'
+      - |
+        if [ -n "${MAVEN_REPO_URL:-}" ] && [ -n "${MAVEN_REPO_ID:-}" ] && [ -n "${MAVEN_USERNAME:-}" ] && [ -n "${MAVEN_PASSWORD:-}" ]; then
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'XML'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <servers>
+              <server>
+                <id>${env.MAVEN_REPO_ID}</id>
+                <username>${env.MAVEN_USERNAME}</username>
+                <password>${env.MAVEN_PASSWORD}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>use-internal</id>
+                <repositories>
+                  <repository>
+                    <id>${env.MAVEN_REPO_ID}</id>
+                    <url>${env.MAVEN_REPO_URL}</url>
+                    <releases><enabled>true</enabled></releases>
+                    <snapshots><enabled>true</enabled></snapshots>
+                  </repository>
+                </repositories>
+                <pluginRepositories>
+                  <pluginRepository>
+                    <id>${env.MAVEN_REPO_ID}</id>
+                    <url>${env.MAVEN_REPO_URL}</url>
+                  </pluginRepository>
+                </pluginRepositories>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>use-internal</activeProfile>
+            </activeProfiles>
+          </settings>
+          XML
+        else
+          echo "No private Maven repo envs provided; using Maven Central only."
+        fi
+
       - "echo Building Spring Boot JAR..."
       - |
         if [ -f mvnw ] || [ -f pom.xml ]; then
           chmod +x mvnw 2>/dev/null || true
           ./mvnw -q -DskipTests package || mvn -q -DskipTests package
-          export JAR_FILE=$(ls target/*.jar | head -n1)
+          export JAR_FILE=$(ls target/*.jar 2>/dev/null | head -n1 || true)
         else
           echo 'pom.xml not found'; exit 1
         fi
-      - 'echo JAR_FILE=${JAR_FILE}'
+      - 'test -f "$JAR_FILE" || (echo "JAR not found (check Maven deps/credentials)."; exit 1)'
+      - 'echo "JAR_FILE=${JAR_FILE}"'
+
+      # --- resolve tag จาก CodeBuild (ถ้าไม่มี ใช้ IMAGE_TAG=latest) ---
+      - 'RESOLVED_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:-${IMAGE_TAG}}"'
+      - 'echo "RESOLVED_TAG=${RESOLVED_TAG}"'
+
       - 'aws ecr describe-repositories --repository-names "$IMAGE_REPO_NAME" --region "$AWS_REGION" || aws ecr create-repository --repository-name "$IMAGE_REPO_NAME" --region "$AWS_REGION"'
       - 'aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"'
+
       - "echo Building Docker image..."
-      - "docker build -t ${IMAGE_REPO_NAME}:${IMAGE_TAG} ."
-      - 'docker tag "${IMAGE_REPO_NAME}:${IMAGE_TAG}" "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${IMAGE_TAG}"'
+      - "docker build -t ${IMAGE_REPO_NAME}:${RESOLVED_TAG} ."
+      - 'docker tag "${IMAGE_REPO_NAME}:${RESOLVED_TAG}" "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${RESOLVED_TAG}"'
 
   build:
     commands:
       - "echo Pushing Docker image to ECR..."
-      - 'docker push "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${IMAGE_TAG}"'
+      - 'docker push "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${RESOLVED_TAG}"'
 
   post_build:
     commands:
@@ -69,14 +124,12 @@ phases:
       - 'aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"'
       - "echo Deploying..."
 
-      # --- เตรียมตัวแปรภาพใน ECR ---
-      - 'IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${IMAGE_TAG}"'
+      - 'IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${RESOLVED_TAG}"'
       - 'echo "IMAGE_URI=${IMAGE_URI}"'
 
-      # --- แทนค่าพร้อมกันทั้ง 2 ไฟล์ ---
+      # --- แทนค่าลง manifests ---
       - 'sed -i "s|<ci-name>|${IMAGE_REPO_NAME}|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
-      - 'sed -i "s|<tag>|${IMAGE_TAG}|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
-      # กรณีไฟล์เดิมอ้าง Docker Hub (index.docker.io/sunseries), เปลี่ยนเป็น ECR
+      - 'sed -i "s|<tag>|${RESOLVED_TAG}|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
       - 'sed -i "s|index.docker.io/sunseries|${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com|g" "$DEPLOYMENT_FILE" "$SERVICE_FILE"'
 
       - 'kubectl -n "$K8S_NAMESPACE" apply -f "$DEPLOYMENT_FILE"'
